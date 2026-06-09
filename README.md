@@ -113,21 +113,6 @@ METRIC hmacUs=... decryptUs=... rxProcessUs=...
 SESSION READY ... deriveUs=...
 ```
 
-Hocaya resource-constrained cihazlarda guvenlik maliyetini gostermek icin `i` ve `s` komutlarindaki paket boyutu ve islem suresi farkini karsilastir.
-
-## Hocaya anlatim akisi
-
-1. "Ilk olarak guvensiz UDP haberlesmeyi gosteriyorum."
-2. Node 1'de `i` bas, Node 2'de plaintext kabulunu goster.
-3. Wireshark'ta ayni plaintext'in agdan okunabildigini goster.
-4. "Simdi iki cihaz nonce degisimi yapip session key turetiyor."
-5. Node 1'de `k` bas, iki tarafta `SESSION READY` ciktisini goster.
-6. "Simdi ayni veriyi AES ile gizliyorum, HMAC ile butunluk ve kimlik dogrulama ekliyorum."
-7. Node 1'de `s` bas, Wireshark'ta payload'in okunamadigini goster.
-8. Node 1'de `t` bas, Node 2'de HMAC mismatch ile reddedildigini goster.
-9. Node 1'de `r` bas, Node 2'de replay detected ile reddedildigini goster.
-10. Node 1'de `f` bas, yanlis anahtarla uretilmis paketin kimlik dogrulamadan gecemedigini goster.
-
 ## Sinirlar
 
 Bu demo `MASTER_KEY` degerini kod icinde tutar. Gercek urunde master key cihaza guvenli provision edilmeli, nonce tekrar kullanimi kalici sayacla garanti edilmeli ve daha gelismis pencere tabanli replay kontrolu eklenmelidir.
