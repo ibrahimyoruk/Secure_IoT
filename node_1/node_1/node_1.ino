@@ -144,6 +144,24 @@ void startHandshake() {
   sendRaw(packet, sizeof(packet), "HELLO");
 }
 
+void handleTextAlert(const uint8_t *packet, int len) {
+  char text[MAX_PACKET + 1];
+  int copyLen = min(len, (int)MAX_PACKET);
+  memcpy(text, packet, copyLen);
+  text[copyLen] = '\0';
+
+  if (strncmp(text, "NODE2_ALERT REKEY_REQUIRED", 26) == 0) {
+    Serial.println();
+    Serial.print("DEFENSE ALERT FROM NODE2: ");
+    Serial.println(text);
+    Serial.println("AUTO ACTION: starting new handshake");
+    startHandshake();
+  } else if (strncmp(text, "NODE2 ", 6) == 0) {
+    Serial.print("NODE2 DECISION: ");
+    Serial.println(text);
+  }
+}
+
 void handleIncomingHandshake() {
   int packetLen = udp.parsePacket();
   if (packetLen < (int)HEADER_LEN || packetLen > (int)MAX_PACKET) {
@@ -152,7 +170,12 @@ void handleIncomingHandshake() {
 
   uint8_t packet[MAX_PACKET];
   int readLen = udp.read(packet, sizeof(packet));
-  if (readLen < (int)HEADER_LEN || packet[0] != MAGIC || packet[1] != VERSION) {
+  if (readLen < (int)HEADER_LEN) {
+    return;
+  }
+
+  if (packet[0] != MAGIC || packet[1] != VERSION) {
+    handleTextAlert(packet, readLen);
     return;
   }
 
@@ -231,6 +254,62 @@ void sendDemoMessage(uint8_t mode, bool forged, const char *command) {
   Serial.println(micros() - totalStart);
 }
 
+void runBenchmark() {
+  const int rounds = 10;
+  uint8_t packet[MAX_PACKET];
+  uint32_t cryptoUs = 0;
+  uint32_t insecureCryptoTotal = 0;
+  uint32_t secureCryptoTotal = 0;
+  size_t insecureSizeTotal = 0;
+  size_t secureSizeTotal = 0;
+  int secureRounds = sessionReady ? rounds : 0;
+
+  Serial.println();
+  Serial.println("BENCHMARK START");
+
+  for (int i = 0; i < rounds; i++) {
+    char msg[64];
+    snprintf(msg, sizeof(msg), "OPEN_LOCK bench_insecure=%d", i);
+    size_t len = buildDataPacket(MODE_INSECURE, msg, false, packet, sizeof(packet), &cryptoUs);
+    if (len > 0) {
+      sendRaw(packet, len, "BENCH_INSECURE");
+      insecureSizeTotal += len;
+      insecureCryptoTotal += cryptoUs;
+      delay(20);
+    }
+  }
+
+  if (!sessionReady) {
+    Serial.println("BENCH_SECURE skipped: run k first for session key.");
+  }
+
+  for (int i = 0; i < secureRounds; i++) {
+    char msg[64];
+    snprintf(msg, sizeof(msg), "OPEN_LOCK bench_secure=%d", i);
+    size_t len = buildDataPacket(MODE_SECURE, msg, false, packet, sizeof(packet), &cryptoUs);
+    if (len > 0) {
+      sendRaw(packet, len, "BENCH_SECURE");
+      secureSizeTotal += len;
+      secureCryptoTotal += cryptoUs;
+      delay(20);
+    }
+  }
+
+  Serial.println("BENCHMARK RESULT");
+  Serial.print("INSECURE avgSize=");
+  Serial.print(insecureSizeTotal / rounds);
+  Serial.print(" avgBuildUs=");
+  Serial.println(insecureCryptoTotal / rounds);
+
+  if (secureRounds > 0) {
+    Serial.print("SECURE avgSize=");
+    Serial.print(secureSizeTotal / secureRounds);
+    Serial.print(" avgEncryptHmacUs=");
+    Serial.println(secureCryptoTotal / secureRounds);
+  }
+  Serial.println("BENCHMARK END");
+}
+
 void replayLastPacket() {
   if (lastPacketLen == 0) {
     Serial.println("No packet to replay. Send one first.");
@@ -262,6 +341,7 @@ void printHelp() {
   Serial.println("  f -> send forged OPEN_LOCK packet with wrong HMAC key");
   Serial.println("  r -> replay the last packet");
   Serial.println("  t -> tamper with the last packet and send it");
+  Serial.println("  b -> benchmark insecure vs secure packet cost");
   Serial.println("  h -> help");
   Serial.println();
   Serial.println("Wireshark filter: udp.port == 4210");
@@ -310,6 +390,8 @@ void loop() {
     replayLastPacket();
   } else if (c == 't') {
     tamperLastPacket();
+  } else if (c == 'b') {
+    runBenchmark();
   } else if (c == 'h') {
     printHelp();
   }

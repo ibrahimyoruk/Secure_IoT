@@ -37,6 +37,11 @@ uint8_t sessionHmacKey[32];
 bool sessionReady = false;
 uint32_t lastAcceptedSecureSeq = 0;
 bool secureMode = false;
+bool lockOpen = false;
+IPAddress trustedPeerIp;
+uint16_t trustedPeerPort = UDP_PORT;
+bool trustedPeerKnown = false;
+uint32_t attackCounter = 0;
 
 uint16_t getU16(const uint8_t *buf) {
   return ((uint16_t)buf[0] << 8) | buf[1];
@@ -132,9 +137,96 @@ void printHexPreview(const uint8_t *data, size_t len) {
   }
 }
 
+void sendDecision(IPAddress remoteIp, uint16_t remotePort, const char *status, const char *reason) {
+  char response[128];
+  snprintf(response, sizeof(response), "NODE2 %s %s mode=%s session=%s lock=%s",
+           status,
+           reason,
+           secureMode ? "SECURE" : "INSECURE",
+           sessionReady ? "READY" : "NOT_READY",
+           lockOpen ? "OPEN" : "CLOSED");
+  udp.beginPacket(remoteIp, remotePort);
+  udp.write((const uint8_t *)response, strlen(response));
+  udp.endPacket();
+}
+
+void rememberTrustedPeer(IPAddress remoteIp, uint16_t remotePort) {
+  trustedPeerIp = remoteIp;
+  trustedPeerPort = remotePort;
+  trustedPeerKnown = true;
+}
+
+void sendRekeyRequestToTrustedPeer(const char *reason, IPAddress attackerIp) {
+  if (!trustedPeerKnown) {
+    Serial.println("DEFENSE: trusted peer unknown, cannot request automatic rekey");
+    return;
+  }
+
+  char alert[128];
+  snprintf(alert, sizeof(alert), "NODE2_ALERT REKEY_REQUIRED reason=%s attacker=%u.%u.%u.%u",
+           reason,
+           attackerIp[0], attackerIp[1], attackerIp[2], attackerIp[3]);
+  udp.beginPacket(trustedPeerIp, trustedPeerPort);
+  udp.write((const uint8_t *)alert, strlen(alert));
+  udp.endPacket();
+  Serial.print("DEFENSE: rekey request sent to trusted peer ");
+  Serial.print(trustedPeerIp);
+  Serial.print(":");
+  Serial.println(trustedPeerPort);
+}
+
+void logAttackAndRekey(IPAddress remoteIp, uint16_t remotePort, const char *reason, uint8_t mode, uint32_t seq, size_t len) {
+  attackCounter++;
+  Serial.println();
+  Serial.println("!!! SECURITY ALERT !!!");
+  Serial.print("attackNo=");
+  Serial.print(attackCounter);
+  Serial.print(" attacker=");
+  Serial.print(remoteIp);
+  Serial.print(":");
+  Serial.print(remotePort);
+  Serial.print(" reason=");
+  Serial.print(reason);
+  Serial.print(" mode=");
+  Serial.print(mode == MODE_SECURE ? "SECURE" : (mode == MODE_INSECURE ? "INSECURE" : "OTHER"));
+  Serial.print(" seq=");
+  Serial.print(seq);
+  Serial.print(" bytes=");
+  Serial.println(len);
+  Serial.println("DEFENSE ACTION: session invalidated, re-handshake required");
+
+  sessionReady = false;
+  lastAcceptedSecureSeq = 0;
+  sendRekeyRequestToTrustedPeer(reason, remoteIp);
+}
+
+void setRgb(uint8_t red, uint8_t green, uint8_t blue) {
+  neopixelWrite(LOCK_LED_PIN, red, green, blue);
+}
+
+void showIdleStatus() {
+  if (lockOpen) {
+    setRgb(0, 40, 0);        // Green: lock open.
+  } else if (secureMode) {
+    setRgb(0, 0, 35);        // Blue: secure mode ready/closed.
+  } else {
+    setRgb(35, 25, 0);       // Yellow: insecure mode/closed.
+  }
+}
+
+void flashRejected() {
+  setRgb(45, 0, 0);          // Red: blocked attack or rejected packet.
+  delay(250);
+  showIdleStatus();
+}
+
 void printMode() {
   Serial.print("DEVICE MODE: ");
   Serial.println(secureMode ? "SECURE_MODE (plaintext commands rejected)" : "INSECURE_MODE (plaintext commands accepted)");
+  Serial.print("SESSION: ");
+  Serial.println(sessionReady ? "READY" : "NOT_READY");
+  Serial.print("LOCK: ");
+  Serial.println(lockOpen ? "OPEN" : "CLOSED");
 }
 
 void printHelp() {
@@ -148,11 +240,13 @@ void printHelp() {
 
 void applyLockCommand(const char *message, bool secure) {
   if (strncmp(message, "OPEN_LOCK", 9) == 0) {
-    neopixelWrite(LOCK_LED_PIN, 0, 40, 0);
+    lockOpen = true;
+    showIdleStatus();
     Serial.print("LOCK ACTION: OPEN accepted via ");
     Serial.println(secure ? "SECURE channel" : "INSECURE channel");
   } else if (strncmp(message, "CLOSE_LOCK", 10) == 0) {
-    neopixelWrite(LOCK_LED_PIN, 0, 0, 0);
+    lockOpen = false;
+    showIdleStatus();
     Serial.print("LOCK ACTION: CLOSE accepted via ");
     Serial.println(secure ? "SECURE channel" : "INSECURE channel");
   } else {
@@ -176,16 +270,21 @@ void sendHelloAck(IPAddress remoteIp, uint16_t remotePort, uint32_t seq) {
 void handleHello(size_t len, IPAddress remoteIp, uint16_t remotePort) {
   if (len != HEADER_LEN) {
     Serial.println("REJECT: bad HELLO length");
+    sendDecision(remoteIp, remotePort, "BLOCKED", "BAD_HELLO_LENGTH");
+    flashRejected();
     return;
   }
 
   uint32_t seq = getU32(packet + 4);
+  rememberTrustedPeer(remoteIp, remotePort);
   memcpy(clientNonce, packet + 8, 12);
   fillRandom(serverNonce, sizeof(serverNonce));
 
   uint32_t t0 = micros();
   if (!deriveSessionKeys()) {
     Serial.println("SESSION FAILED: key derivation error");
+    sendDecision(remoteIp, remotePort, "BLOCKED", "KEY_DERIVATION_FAILED");
+    flashRejected();
     return;
   }
   uint32_t deriveUs = micros() - t0;
@@ -195,6 +294,8 @@ void handleHello(size_t len, IPAddress remoteIp, uint16_t remotePort) {
   Serial.print(remoteIp);
   Serial.print(" deriveUs=");
   Serial.println(deriveUs);
+  sendDecision(remoteIp, remotePort, "ACCEPTED", "SESSION_READY");
+  showIdleStatus();
 }
 
 void handleData(size_t len, IPAddress remoteIp, uint16_t remotePort) {
@@ -222,10 +323,15 @@ void handleData(size_t len, IPAddress remoteIp, uint16_t remotePort) {
     if (secureMode) {
       Serial.println("REJECT: plaintext command blocked because device is in SECURE_MODE");
       Serial.println("LOCK ACTION: unchanged");
+      logAttackAndRekey(remoteIp, remotePort, "PLAINTEXT_IN_SECURE_MODE", mode, seq, len);
+      sendDecision(remoteIp, remotePort, "BLOCKED", "PLAINTEXT_IN_SECURE_MODE");
+      flashRejected();
       return;
     }
     if (HEADER_LEN + payloadLen != len) {
       Serial.println("REJECT: insecure length mismatch");
+      sendDecision(remoteIp, remotePort, "BLOCKED", "INSECURE_LENGTH_MISMATCH");
+      flashRejected();
       return;
     }
     memcpy(plaintext, packet + HEADER_LEN, payloadLen);
@@ -236,27 +342,38 @@ void handleData(size_t len, IPAddress remoteIp, uint16_t remotePort) {
     Serial.println("Replay/tamper status: not protected");
     Serial.print("METRIC rxProcessUs=");
     Serial.println(micros() - packetStart);
+    sendDecision(remoteIp, remotePort, "ACCEPTED", "INSECURE_COMMAND");
     return;
   }
 
   if (mode != MODE_SECURE) {
     Serial.println("REJECT: unknown mode");
+    sendDecision(remoteIp, remotePort, "BLOCKED", "UNKNOWN_MODE");
+    flashRejected();
     return;
   }
 
   if (!secureMode) {
     Serial.println("REJECT: secure packet received while device is in INSECURE_MODE");
     Serial.println("Switch Node 2 to SECURE_MODE with serial command: 1");
+    sendDecision(remoteIp, remotePort, "BLOCKED", "SECURE_PACKET_IN_INSECURE_MODE");
+    flashRejected();
     return;
   }
 
   if (!sessionReady) {
     Serial.println("REJECT: no session. Run handshake first.");
+    logAttackAndRekey(remoteIp, remotePort, "NO_SESSION", mode, seq, len);
+    sendDecision(remoteIp, remotePort, "BLOCKED", "NO_SESSION");
+    flashRejected();
     return;
   }
 
   if (HEADER_LEN + payloadLen + TAG_LEN != len) {
     Serial.println("REJECT: secure length mismatch");
+    logAttackAndRekey(remoteIp, remotePort, "SECURE_LENGTH_MISMATCH", mode, seq, len);
+    sendDecision(remoteIp, remotePort, "BLOCKED", "SECURE_LENGTH_MISMATCH");
+    flashRejected();
     return;
   }
 
@@ -264,6 +381,9 @@ void handleData(size_t len, IPAddress remoteIp, uint16_t remotePort) {
   uint32_t verifyStart = micros();
   if (!hmacWithKey(sessionHmacKey, sizeof(sessionHmacKey), packet, HEADER_LEN + payloadLen, expectedTag)) {
     Serial.println("REJECT: HMAC calculation failed");
+    logAttackAndRekey(remoteIp, remotePort, "HMAC_CALC_FAILED", mode, seq, len);
+    sendDecision(remoteIp, remotePort, "BLOCKED", "HMAC_CALC_FAILED");
+    flashRejected();
     return;
   }
   uint32_t hmacUs = micros() - verifyStart;
@@ -275,18 +395,27 @@ void handleData(size_t len, IPAddress remoteIp, uint16_t remotePort) {
     Serial.println();
     Serial.print("METRIC hmacUs=");
     Serial.println(hmacUs);
+    logAttackAndRekey(remoteIp, remotePort, "HMAC_MISMATCH", mode, seq, len);
+    sendDecision(remoteIp, remotePort, "BLOCKED", "HMAC_MISMATCH");
+    flashRejected();
     return;
   }
 
   if (seq <= lastAcceptedSecureSeq) {
     Serial.print("REJECT: replay detected, lastAcceptedSecureSeq=");
     Serial.println(lastAcceptedSecureSeq);
+    logAttackAndRekey(remoteIp, remotePort, "REPLAY_DETECTED", mode, seq, len);
+    sendDecision(remoteIp, remotePort, "BLOCKED", "REPLAY_DETECTED");
+    flashRejected();
     return;
   }
 
   uint32_t decryptStart = micros();
   if (!aesCtrCrypt(packet + HEADER_LEN, plaintext, payloadLen, packet + 8)) {
     Serial.println("REJECT: AES decrypt failed");
+    logAttackAndRekey(remoteIp, remotePort, "AES_DECRYPT_FAILED", mode, seq, len);
+    sendDecision(remoteIp, remotePort, "BLOCKED", "AES_DECRYPT_FAILED");
+    flashRejected();
     return;
   }
   uint32_t decryptUs = micros() - decryptStart;
@@ -306,16 +435,21 @@ void handleData(size_t len, IPAddress remoteIp, uint16_t remotePort) {
   Serial.print(decryptUs);
   Serial.print(" rxProcessUs=");
   Serial.println(micros() - packetStart);
+  sendDecision(remoteIp, remotePort, "ACCEPTED", "SECURE_COMMAND");
 }
 
 void handlePacket(size_t len, IPAddress remoteIp, uint16_t remotePort) {
   if (len < HEADER_LEN) {
     Serial.println("REJECT: packet too short");
+    sendDecision(remoteIp, remotePort, "BLOCKED", "PACKET_TOO_SHORT");
+    flashRejected();
     return;
   }
 
   if (packet[0] != MAGIC || packet[1] != VERSION) {
     Serial.println("REJECT: bad magic/version");
+    sendDecision(remoteIp, remotePort, "BLOCKED", "BAD_MAGIC_VERSION");
+    flashRejected();
     return;
   }
 
@@ -330,7 +464,7 @@ void handlePacket(size_t len, IPAddress remoteIp, uint16_t remotePort) {
 void setup() {
   Serial.begin(115200);
   delay(1000);
-  neopixelWrite(LOCK_LED_PIN, 0, 0, 0);
+  setRgb(0, 0, 0);
 
   WiFi.mode(WIFI_STA);
   WiFi.begin(WIFI_SSID, WIFI_PASS);
@@ -348,6 +482,7 @@ void setup() {
   Serial.println(UDP_PORT);
   Serial.println("Wireshark filter: udp.port == 4210");
   printHelp();
+  showIdleStatus();
 }
 
 void loop() {
@@ -357,14 +492,16 @@ void loop() {
       secureMode = false;
       sessionReady = false;
       lastAcceptedSecureSeq = 0;
-      neopixelWrite(LOCK_LED_PIN, 0, 0, 0);
+      lockOpen = false;
+      showIdleStatus();
       Serial.println("Switched to INSECURE_MODE. LED off.");
       printMode();
     } else if (c == '1') {
       secureMode = true;
       sessionReady = false;
       lastAcceptedSecureSeq = 0;
-      neopixelWrite(LOCK_LED_PIN, 0, 0, 0);
+      lockOpen = false;
+      showIdleStatus();
       Serial.println("Switched to SECURE_MODE. Run Node 1 command k before secure OPEN_LOCK.");
       printMode();
     } else if (c == 'h') {
@@ -379,6 +516,8 @@ void loop() {
 
   if ((size_t)packetLen > sizeof(packet)) {
     Serial.println("REJECT: packet exceeds buffer");
+    sendDecision(udp.remoteIP(), udp.remotePort(), "BLOCKED", "PACKET_EXCEEDS_BUFFER");
+    flashRejected();
     while (udp.available()) {
       udp.read();
     }

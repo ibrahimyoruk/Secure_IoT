@@ -13,12 +13,19 @@ Bu proje final demosu icin iki ESP32-C6 DevKitC-1 arasinda UDP tabanli guvenli v
 - Guvenli modda header + ciphertext uzerinden HMAC-SHA256 uretilir.
 - Guvenli modda sequence number eski veya ayniysa replay olarak reddedilir.
 - Node 1 seri komutlari ile normal, forged, tamper ve replay paketleri canli gonderilir.
+- Laptop attacker scripti ile PC'den forged plaintext/secure/replay denemeleri yapilir.
+- Node 2 her PC denemesine UDP cevap doner: `ACCEPTED` veya `BLOCKED` ve sebebi.
+- PC tarafinda attack/defense dashboard toplam gonderilen, kabul edilen, bloklanan ve cevapsiz kalan denemeleri sayar.
+- Node 2 kritik saldirilarda saldirgan IP/port/sequence bilgisini seri ekrana yazar.
+- Kritik saldiri sonrasi Node 2 mevcut session'i gecersiz sayar ve Node 1'e otomatik `REKEY_REQUIRED` alarmi yollar.
+- Node 1 bu alarmi alinca otomatik yeni handshake baslatir.
 - Iki tarafta da basit performans metrikleri seri ekrana yazilir.
 
 ## Dosyalar
 
 - `node_1/node_1/node_1.ino`: sender ve saldiri tetikleme konsolu
 - `node_2/node_2/node_2.ino`: receiver, handshake, HMAC dogrulama, decrypt ve replay kontrolu
+- `attacker_laptop/attacker.py`: PC'den insecure/secure/replay saldiri denemeleri ve dashboard
 - `DEMO_SCRIPT.md`: hocaya gosterilecek canli demo akisi
 
 ## Kurulum
@@ -51,11 +58,61 @@ arduino-cli upload -p /dev/cu.usbmodemYYYY --fqbn esp32:esp32:esp32c6 node_2/nod
 
 - `k`: nonce handshake baslatir ve session key turetir
 - `i`: guvensiz plaintext paket gonderir
+- `o`: guvensiz plaintext close paketi gonderir
 - `s`: AES-CTR + HMAC-SHA256 korumali paket gonderir
+- `c`: AES-CTR + HMAC-SHA256 korumali close paketi gonderir
 - `f`: yanlis HMAC key ile forged paket gonderir
 - `r`: son paketi aynen tekrar yollar, yani replay yapar
 - `t`: son paketin payload bolgesinde bit cevirip yollar, yani tamper yapar
+- `b`: benchmark paketleri gonderir
 - `h`: yardim menusu
+
+## Laptop attacker dashboard
+
+PC tarafindan saldiri menusu:
+
+```bash
+python3 attacker_laptop/attacker.py
+```
+
+Menu:
+
+- `1`: plaintext `OPEN_LOCK` yollar
+- `2`: plaintext `CLOSE_LOCK` yollar
+- `3`: secure gibi gorunen ama HMAC'i yanlis forged paket yollar
+- `4`: UDP broadcast paketlerini dinler
+- `5`: Wireshark'tan alinan UDP payload hex degerini replay eder
+- `8`: insecure ve secure mod saldiri setini sirayla calistirir
+- `9`: dashboard sayaclarini gosterir
+- `10`: dashboard sayaclarini sifirlar
+
+Node 2 her paketten sonra laptopa karar cevabi yollar:
+
+```text
+NODE2 BLOCKED PLAINTEXT_IN_SECURE_MODE mode=SECURE session=NOT_READY lock=CLOSED
+NODE2 BLOCKED HMAC_MISMATCH mode=SECURE session=NOT_READY lock=CLOSED
+NODE2 ACCEPTED INSECURE_COMMAND mode=INSECURE session=NOT_READY lock=OPEN
+```
+
+Sunumdaki mesaj: guvensiz modda PC komutu kilidi acabilir, guvenli modda ayni PC denemesi cihaz tarafindan gerekcesiyle bloklanir.
+
+Kritik saldirida Node 2 seri monitorunde beklenen alarm:
+
+```text
+!!! SECURITY ALERT !!!
+attackNo=1 attacker=172.20.10.3:53421 reason=HMAC_MISMATCH mode=SECURE seq=9001 bytes=72
+DEFENSE ACTION: session invalidated, re-handshake required
+DEFENSE: rekey request sent to trusted peer 172.20.10.4:4210
+```
+
+Node 1 seri monitorunde beklenen otomatik savunma:
+
+```text
+DEFENSE ALERT FROM NODE2: NODE2_ALERT REKEY_REQUIRED reason=HMAC_MISMATCH attacker=172.20.10.3
+AUTO ACTION: starting new handshake
+HELLO sent, bytes=22
+SESSION READY, ackSeq=...
+```
 
 ## Wireshark
 

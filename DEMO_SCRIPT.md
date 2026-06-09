@@ -134,7 +134,81 @@ Anlatim:
 
 > Bu kez paket bozulmus degil; saldirgan yanlis anahtarla yeni paket uretmeye calisiyor. Node 2 ayni session HMAC key'e sahip olmadigi icin paketi kimlik dogrulamadan reddediyor.
 
-## 7. Performans karsilastirmasi
+## 7. Laptop attacker dashboard
+
+Terminalde:
+
+```bash
+python3 attacker_laptop/attacker.py
+```
+
+Once Node 2 seri monitorunde:
+
+```text
+0
+```
+
+PC attacker menusunde:
+
+```text
+1
+```
+
+Beklenen PC ciktisi:
+
+```text
+NODE2 ACCEPTED INSECURE_COMMAND mode=INSECURE session=NOT_READY lock=OPEN
+result      : ACCEPTED
+```
+
+Sonra Node 2 seri monitorunde:
+
+```text
+1
+```
+
+PC attacker menusunde tekrar:
+
+```text
+1
+```
+
+Beklenen PC ciktisi:
+
+```text
+NODE2 BLOCKED PLAINTEXT_IN_SECURE_MODE mode=SECURE session=NOT_READY lock=CLOSED
+result      : BLOCKED
+```
+
+Ardindan PC attacker menusunde:
+
+```text
+3
+```
+
+Beklenen PC ciktisi:
+
+```text
+NODE2 BLOCKED HMAC_MISMATCH mode=SECURE session=NOT_READY lock=CLOSED
+result      : BLOCKED
+```
+
+Anlatim:
+
+> Burada saldiriyi Node 1 uzerinden degil laptop uzerinden yapiyorum. Guvensiz modda PC plaintext komutla kilidi acabiliyor. Guvenli modda ayni PC komutu bloklaniyor; cihaz sadece sessizce reddetmiyor, laptopa `BLOCKED` ve nedeniyle beraber savunma karari donuyor. Dashboard da toplam kabul/blok sayisini canli gosteriyor.
+
+Ek savunma gosterimi:
+
+1. Node 2 secure moddayken Node 1'de `k` ile session kur.
+2. PC attacker menusunde `3` ile fake secure paket gonder.
+3. Node 2 seri monitorunde saldirgan IP/port/seq ve sebep bilgisini goster.
+4. Node 1 seri monitorunde `REKEY_REQUIRED` alarmi sonrasi otomatik `HELLO` atildigini ve yeni session kuruldugunu goster.
+
+Anlatim:
+
+> Kritik saldiri algilandiginda Node 2 sadece paketi reddetmiyor; saldirgan kaydini tutuyor, mevcut session'i guvenli kabul etmeyip dusuruyor ve yetkili Node 1'e yeniden handshake talebi yolluyor. Node 1 bu alarmi alinca otomatik yeni nonce handshake baslatiyor. Bu da intrusion detection sonrasi defensive rekey mekanizmasi gibi dusunulebilir.
+
+## 8. Performans karsilastirmasi
 
 Node 1 ve Node 2 seri ekranindaki `METRIC` satirlarini goster.
 
